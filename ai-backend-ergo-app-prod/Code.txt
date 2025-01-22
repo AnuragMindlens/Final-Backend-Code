@@ -1,0 +1,587 @@
+import React, { useState } from 'react';
+import axios from 'axios';
+import { useBack, useCustomMutation, useGo, useUpdate } from '@refinedev/core';
+import { API_URL } from '../../constants';
+import { useParams } from 'react-router-dom';
+
+const apiEndpoints = [
+  { legPosition: 'http://localhost:8000/api/analyze/back-angle/' },
+  { handPosition: 'http://localhost:8000/api/analyze/arm-screen/' },
+  { deskPosition: 'http://localhost:8000/api/images/anthropic-analysis/' },
+  { annotateObject: 'https://aibackend.synergopro.com/api/images/annotateobject/' },
+];
+
+export const Aicase: React.FC = () => {
+  const { id } = useParams();
+  const { mutate: mutateUpdateAICase } = useUpdate();
+  const { mutate: mutateCustom } = useCustomMutation();
+  const go = useGo();
+
+  const [images, setImages] = useState<(string | ArrayBuffer | null)[]>([null, null, null, null]);
+  const [responses, setResponses] = useState<string[][]>([[], [], [], []]);
+  const [responseImages, setResponseImages] = useState<(string | null)[]>([null, null, null, null]);
+  const [combinedJson, setCombinedJson] = useState<{
+    seatedposture: string[];
+    handposition: string[];
+    deskposition: string[];
+    imageannotation: string[];
+    seatedpostureImage: string;
+    handpositionImage: string;
+    deskpositionImage: string;
+    imageannotationImage: string;
+    person_bbox: string;
+    chair_bbox: string;
+    desk_bbox: string;
+    tv_bbox: string;
+    legposition: string[];
+    legpositionImage: string;
+  }>({
+    seatedposture: [],
+    handposition: [],
+    deskposition: [],
+    imageannotation: [],
+    seatedpostureImage: '',
+    handpositionImage: '',
+    deskpositionImage: '',
+    imageannotationImage: '',
+    person_bbox: '',
+    chair_bbox: '',
+    desk_bbox: '',
+    tv_bbox: '',
+    legposition: [],
+    legpositionImage: ''
+  });
+
+  const b64toBlob = (dataURI: string, contentType = '') => {
+    const byteString = dataURI.split(',')[1];
+    const ab = new ArrayBuffer(byteString.length);
+    const ia = new Uint8Array(ab);
+    for (let i = 0; i < byteString.length; i++) {
+      ia[i] = byteString.charCodeAt(i);
+    }
+    return new Blob([ab], { type: contentType || 'image/jpeg' });
+  };
+
+  const handleImageUpload = async (event: React.ChangeEvent<HTMLInputElement>, index: number) => {
+    const file = event.target.files?.[0];
+    if (!file) return;
+
+    const reader = new FileReader();
+    reader.onloadend = async () => {
+      const imageUrl = reader.result;
+      if (typeof imageUrl === 'string' || imageUrl instanceof ArrayBuffer) {
+        setImages(prev => {
+          const newImages = [...prev];
+          newImages[index] = imageUrl;
+          return newImages;
+        });
+      }
+
+      const formData = new FormData();
+      formData.append('image', file);
+      if (id && index !== 2) {
+        formData.append('aiCaseId', id);
+      }
+
+      try {
+        // Leg Position Analysis (index === 0)
+        if (index === 0) {
+          try {
+            setResponses(prev => {
+              const newResponses = [...prev];
+              newResponses[index] = ['Analyzing leg position...'];
+              return newResponses;
+            });
+
+            const response = await axios.post('http://localhost:8000/api/analyze/back-angle/', formData, {
+              headers: { 'Content-Type': 'multipart/form-data' }
+            });
+
+            if (response?.data) {
+              // Update image display
+              if (response.data.result_image) {
+                setResponseImages(prev => {
+                  const newImages = [...prev];
+                  newImages[index] = `data:image/jpeg;base64,${response.data.result_image}`;
+                  return newImages;
+                });
+              }
+
+              // Format analysis results
+              const analysisResults = {
+                sitting_position: response.data.result?.sitting_position || 'Not detected',
+                back_support: response.data.result?.back_support || { supported: [], unsupported: [] },
+                spine_angle: response.data.metrics?.spine_angle || 'Not detected',
+                chair_distance: response.data.metrics?.chair_distance || 'Not detected',
+                is_side_view: response.data.metrics?.is_side_view || false
+              };
+
+              // Update responses
+              setResponses(prev => {
+                const newResponses = [...prev];
+                newResponses[index] = [
+                  `Sitting Position: ${analysisResults.sitting_position}`,
+                  `Spine Angle: ${analysisResults.spine_angle}°`,
+                  `Chair Distance: ${analysisResults.chair_distance}`,
+                  `Supported Back Areas: ${analysisResults.back_support.supported.join(', ')}`,
+                  `Unsupported Back Areas: ${analysisResults.back_support.unsupported.join(', ')}`
+                ];
+                return newResponses;
+              });
+
+              // Update combined JSON
+              setCombinedJson(prev => ({
+                ...prev,
+                legposition: [JSON.stringify(analysisResults)],
+                legpositionImage: response.data.result_image || ''
+              }));
+
+              // Handle file uploads if ID exists
+              if (id) {
+                // Upload original image
+                const inputFormData = new FormData();
+                inputFormData.append('files', file);
+                inputFormData.append('refId', id);
+                inputFormData.append('ref', 'api::ai-case.ai-case');
+                inputFormData.append('field', 'legPositionInputImage');
+                await mutateCustom({
+                  url: `${API_URL}/api/upload`,
+                  method: 'post',
+                  values: inputFormData,
+                });
+
+                // Upload processed image if available
+                if (response.data.result_image) {
+                  const resultBlob = b64toBlob(`data:image/jpeg;base64,${response.data.result_image}`);
+                  const resultFormData = new FormData();
+                  resultFormData.append('files', resultBlob);
+                  resultFormData.append('refId', id);
+                  resultFormData.append('ref', 'api::ai-case.ai-case');
+                  resultFormData.append('field', 'legPositionAiImage');
+                  await mutateCustom({
+                    url: `${API_URL}/api/upload`,
+                    method: 'post',
+                    values: resultFormData,
+                  });
+                }
+
+                // Update AI case
+                await mutateUpdateAICase({
+                  resource: 'ai-cases',
+                  id,
+                  values: {
+                    legPositionAiResponse: response.data
+                  },
+                });
+              }
+            }
+          } catch (error) {
+            console.error('Leg position analysis error:', error);
+            setResponses(prev => {
+              const newResponses = [...prev];
+              newResponses[index] = ['Error analyzing leg position. Please try again.'];
+              return newResponses;
+            });
+            alert('Error analyzing leg position. Please ensure the image clearly shows your leg position.');
+          }
+        }
+        // Hand Position Analysis
+        else if (index === 1) {
+          try {
+            setResponses(prev => {
+              const newResponses = [...prev];
+              newResponses[index] = ['Analyzing hand position...'];
+              return newResponses;
+            });
+
+            const response = await axios.post('http://localhost:8000/api/analyze/arm-screen/', formData, {
+              headers: { 'Content-Type': 'multipart/form-data' }
+            });
+
+            if (response?.data) {
+              // Update image display
+              if (response.data.result_image) {
+                setResponseImages(prev => {
+                  const newImages = [...prev];
+                  newImages[index] = `data:image/jpeg;base64,${response.data.result_image}`;
+                  return newImages;
+                });
+              }
+
+              // Format analysis results
+              const analysisResults = {
+                screen_distance: response.data.screen_distance || 'Not detected',
+                arm_angle: response.data.arm_angle || 'Not detected',
+                recommendations: response.data.recommendations || [],
+                analysis: response.data.analysis || []
+              };
+
+              // Update responses
+              setResponses(prev => {
+                const newResponses = [...prev];
+                newResponses[index] = [JSON.stringify(analysisResults)];
+                return newResponses;
+              });
+
+              // Update combined JSON
+              setCombinedJson(prev => ({
+                ...prev,
+                handposition: [JSON.stringify(analysisResults)],
+                handpositionImage: response.data.result_image || ''
+              }));
+
+              // Handle file uploads if ID exists
+              if (id) {
+                // Upload original image
+                const inputFormData = new FormData();
+                inputFormData.append('files', file);
+                inputFormData.append('refId', id);
+                inputFormData.append('ref', 'api::ai-case.ai-case');
+                inputFormData.append('field', 'handPositionInputImage');
+                await mutateCustom({
+                  url: `${API_URL}/api/upload`,
+                  method: 'post',
+                  values: inputFormData,
+                });
+
+                // Upload processed image if available
+                if (response.data.result_image) {
+                  const resultBlob = b64toBlob(`data:image/jpeg;base64,${response.data.result_image}`);
+                  const resultFormData = new FormData();
+                  resultFormData.append('files', resultBlob);
+                  resultFormData.append('refId', id);
+                  resultFormData.append('ref', 'api::ai-case.ai-case');
+                  resultFormData.append('field', 'handPositionAiImage');
+                  await mutateCustom({
+                    url: `${API_URL}/api/upload`,
+                    method: 'post',
+                    values: resultFormData,
+                  });
+                }
+
+                // Update AI case
+                await mutateUpdateAICase({
+                  resource: 'ai-cases',
+                  id,
+                  values: {
+                    handPositionAiResponse: response.data
+                  },
+                });
+              }
+            }
+          } catch (error) {
+            console.error('Hand position analysis error:', error);
+            setResponses(prev => {
+              const newResponses = [...prev];
+              newResponses[index] = ['Error analyzing hand position. Please try again.'];
+              return newResponses;
+            });
+            alert('Error analyzing hand position. Please ensure the image clearly shows your hand position.');
+          }
+        }
+        // Desk Position Analysis
+        else if (index === 2) {
+          try {
+            setResponses(prev => {
+              const newResponses = [...prev];
+              newResponses[index] = ['Analyzing desk position...'];
+              return newResponses;
+            });
+
+            const response = await axios.post('http://localhost:8000/api/images/anthropic-analysis/', formData, {
+              headers: { 'Content-Type': 'multipart/form-data' }
+            });
+            
+            if (response?.data) {
+              setResponses(prev => {
+                const newResponses = [...prev];
+                newResponses[index] = [JSON.stringify(response.data)];
+                return newResponses;
+              });
+
+              setCombinedJson(prev => ({
+                ...prev,
+                deskposition: [JSON.stringify(response.data)],
+                deskpositionImage: response.data.result_image || '',
+                desk_bbox: response.data.desk_bbox || '',
+                person_bbox: response.data.person_bbox || '',
+                chair_bbox: response.data.chair_bbox || '',
+                tv_bbox: response.data.tv_bbox || ''
+              }));
+
+              // Handle file uploads if ID exists
+              if (id) {
+                const inputFormData = new FormData();
+                inputFormData.append('files', file);
+                inputFormData.append('refId', id);
+                inputFormData.append('ref', 'api::ai-case.ai-case');
+                inputFormData.append('field', 'deskPositionInputImage');
+                await mutateCustom({
+                  url: `${API_URL}/api/upload`,
+                  method: 'post',
+                  values: inputFormData,
+                });
+
+                if (response.data.result_image) {
+                  const resultBlob = b64toBlob(`data:image/jpeg;base64,${response.data.result_image}`);
+                  const resultFormData = new FormData();
+                  resultFormData.append('files', resultBlob);
+                  resultFormData.append('refId', id);
+                  resultFormData.append('ref', 'api::ai-case.ai-case');
+                  resultFormData.append('field', 'deskPositionAiImage');
+                  await mutateCustom({
+                    url: `${API_URL}/api/upload`,
+                    method: 'post',
+                    values: resultFormData,
+                  });
+                }
+
+                await mutateUpdateAICase({
+                  resource: 'ai-cases',
+                  id,
+                  values: {
+                    deskPositionAiResponse: response.data
+                  },
+                });
+              }
+            }
+          } catch (error) {
+            console.error('Desk position analysis error:', error);
+            setResponses(prev => {
+              const newResponses = [...prev];
+              newResponses[index] = ['Error processing image. Please try again.'];
+              return newResponses;
+            });
+            alert('Error analyzing desk position. Please try again with a different image.');
+          }
+        }
+        // Other position analyses
+        else {
+          const endpoint = Object.values(apiEndpoints[index])[0];
+          const response = await axios.post(endpoint, formData, {
+            headers: { 'Content-Type': 'multipart/form-data' }
+          });
+
+          if (response.data) {
+            setResponses(prev => {
+              const newResponses = [...prev];
+              newResponses[index] = [JSON.stringify(response.data)];
+              return newResponses;
+            });
+
+            const key = Object.keys(apiEndpoints[index])[0].toLowerCase();
+            setCombinedJson(prev => ({
+              ...prev,
+              [key]: [JSON.stringify(response.data)],
+              [`${key}Image`]: response.data.annotated_image || ''
+            }));
+
+            if (id) {
+              const inputFormData = new FormData();
+              inputFormData.append('files', file);
+              inputFormData.append('refId', id);
+              inputFormData.append('ref', 'api::ai-case.ai-case');
+              inputFormData.append('field', `${key}InputImage`);
+              await mutateCustom({
+                url: `${API_URL}/api/upload`,
+                method: 'post',
+                values: inputFormData,
+              });
+
+              if (response.data.annotated_image) {
+                const resultBlob = b64toBlob(`data:image/jpeg;base64,${response.data.annotated_image}`);
+                const resultFormData = new FormData();
+                resultFormData.append('files', resultBlob);
+                resultFormData.append('refId', id);
+                resultFormData.append('ref', 'api::ai-case.ai-case');
+                resultFormData.append('field', `${key}AiImage`);
+                await mutateCustom({
+                  url: `${API_URL}/api/upload`,
+                  method: 'post',
+                  values: resultFormData,
+                });
+              }
+
+              await mutateUpdateAICase({
+                resource: 'ai-cases',
+                id,
+                values: {
+                  [`${key}AiResponse`]: response.data
+                },
+              });
+            }
+          }
+        }
+      } catch (error) {
+        console.error(`Error processing image ${index}:`, error);
+        setResponses(prev => {
+          const newResponses = [...prev];
+          newResponses[index] = ['Error processing image. Please try again.'];
+          return newResponses;
+        });
+        alert('Error processing image. Please try again with a different image.');
+      }
+    };
+
+    reader.readAsDataURL(file);
+  };
+
+  const titles = ['Leg position', 'Hand Position', 'Desk Position', 'Image Annotation'];
+  const isGenerateReportDisabled = responses.some(response => response.length === 0);
+
+  return (
+    <div style={{ textAlign: 'center', marginTop: '50px' }}>
+      <h1>Image Upload</h1>
+      <div style={{ display: 'flex', justifyContent: 'center', gap: '20px', flexWrap: 'wrap' }}>
+        {images.map((_, index) => (
+          <div 
+            key={index} 
+            style={{
+              padding: '20px',
+              margin: '10px',
+              borderRadius: '8px',
+              boxShadow: '0 2px 4px rgba(0,0,0,0.1)',
+              backgroundColor: 'white',
+              border: index === 1 ? '3px solid #4CAF50' : '2px solid #4CAF50'
+            }}
+          >
+            <div className="image-upload-section">
+              <h3 style={{ 
+                color: '#4CAF50', 
+                marginBottom: '15px',
+                fontWeight: index === 1 ? 'bold' : 'normal'
+              }}>
+                {titles[index]}
+              </h3>
+              {index === 1 && (
+                <p style={{ fontSize: '14px', color: '#666', marginBottom: '10px' }}>
+                  Upload an image showing your hand position while using the computer
+                </p>
+              )}
+              <div style={{ position: 'relative', overflow: 'hidden', display: 'inline-block' }}>
+                <label
+                  htmlFor={`file-input-${index}`}
+                  style={{
+                    backgroundColor: '#4CAF50',
+                    color: 'white',
+                    padding: '10px 20px',
+                    borderRadius: '5px',
+                    cursor: 'pointer',
+                    display: 'inline-block'
+                  }}
+                >
+                  Choose File
+                </label>
+                <input
+                  id={`file-input-${index}`}
+                  type="file"
+                  accept="image/*"
+                  onChange={(e) => handleImageUpload(e, index)}
+                  style={{
+                    fontSize: '100px',
+                    position: 'absolute',
+                    left: '0',
+                    top: '0',
+                    opacity: '0',
+                    cursor: 'pointer'
+                  }}
+                />
+              </div>
+              {responseImages[index] && (
+                <div style={{ marginTop: '15px' }}>
+                  <img
+                    src={responseImages[index]!}
+                    alt={`Analysis ${index + 1}`}
+                    style={{ 
+                      maxWidth: '300px', 
+                      borderRadius: '5px',
+                      boxShadow: '0 2px 4px rgba(0,0,0,0.1)'
+                    }}
+                  />
+                </div>
+              )}
+              {responses[index].length > 0 && (
+                <div style={{ marginTop: '15px', textAlign: 'left', padding: '10px' }}>
+                  {index === 1 ? (
+                    <div>
+                      {(() => {
+                        try {
+                          const data = JSON.parse(responses[index][0]);
+                          return (
+                            <>
+                              <p><strong>Screen Distance:</strong> {data.screen_distance}</p>
+                              <p><strong>Arm Angle:</strong> {data.arm_angle}°</p>
+                              {data.recommendations?.length > 0 && (
+                                <div>
+                                  <h4>Recommendations:</h4>
+                                  <ul>
+                                    {data.recommendations.map((rec: string, i: number) => (
+                                      <li key={i}>{rec}</li>
+                                    ))}
+                                  </ul>
+                                </div>
+                              )}
+                              {data.analysis?.length > 0 && (
+                                <div>
+                                  <h4>Analysis:</h4>
+                                  <ul>
+                                    {data.analysis.map((item: string, i: number) => (
+                                      <li key={i}>{item}</li>
+                                    ))}
+                                  </ul>
+                                </div>
+                              )}
+                            </>
+                          );
+                        } catch {
+                          return <p>{responses[index][0]}</p>;
+                        }
+                      })()}
+                    </div>
+                  ) : (
+                    <pre style={{ whiteSpace: 'pre-wrap', fontSize: '14px' }}>
+                      {responses[index][0]}
+                    </pre>
+                  )}
+                </div>
+              )}
+            </div>
+          </div>
+        ))}
+      </div>
+      <button
+        onClick={() => console.log(combinedJson)}
+        disabled={isGenerateReportDisabled}
+        style={{
+          marginTop: '30px',
+          padding: '10px 20px',
+          backgroundColor: isGenerateReportDisabled ? '#ccc' : '#4CAF50',
+          color: 'white',
+          border: 'none',
+          borderRadius: '5px',
+          cursor: isGenerateReportDisabled ? 'not-allowed' : 'pointer',
+        }}
+      >
+        Generate Report
+      </button>
+      <button
+        onClick={() => go({ to: "/aicase/create" })}
+        style={{
+          marginTop: '10px',
+          padding: '10px 20px',
+          backgroundColor: '#f0ad4e',
+          color: 'white',
+          border: 'none',
+          borderRadius: '5px',
+          cursor: 'pointer',
+          display: 'block',
+          margin: '10px auto'
+        }}
+      >
+        Back
+      </button>
+    </div>
+  );
+};
+
+export default Aicase;
